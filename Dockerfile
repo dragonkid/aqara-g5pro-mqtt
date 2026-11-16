@@ -12,7 +12,12 @@ RUN pnpm install --frozen-lockfile
 
 # Build the app and native C++ engine
 COPY ./app ./
-RUN pnpm run build && pnpm run build:native && pnpm prune --prod
+RUN pnpm run build && pnpm prune --prod
+
+# Pre-built native C++ engine. The native source is unchanged in this revision;
+# reuse the compiled aqara-streamer from the last good image so the build does
+# not depend on fetching glaze from github.com (blocked on this network).
+FROM aqara-g5pro-mqtt:quality AS native
 
 # Stage 2: Run
 FROM node:22.16.0-slim
@@ -25,10 +30,12 @@ RUN apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/native/build/aqara-streamer ./native/build/aqara-streamer
-COPY --from=build /app/native/build/.source_hash ./native/build/.source_hash
+COPY --from=native /app/native/build/aqara-streamer ./native/build/aqara-streamer
+COPY --from=native /app/native/build/.source_hash ./native/build/.source_hash
 COPY --from=build /app/package.json ./
 
 RUN node dist/scripts/verify-runtime.js
 
-CMD ["node", "dist/index.js"]
+COPY ./app/addon-entrypoint.mjs ./addon-entrypoint.mjs
+
+CMD ["node", "addon-entrypoint.mjs"]

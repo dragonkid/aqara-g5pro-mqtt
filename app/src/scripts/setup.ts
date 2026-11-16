@@ -237,7 +237,7 @@ LOG_LEVEL=${argv["log-level"]}
       envContent += `CAMERA_IPS=${argv["camera-ips"]}\n`;
     }
 
-    const envPath = path.join(process.cwd(), ".env");
+    const envPath = process.env.ENV_FILE || path.join(process.cwd(), ".env");
     fs.writeFileSync(envPath, envContent, { encoding: "utf-8", mode: 0o600 });
     fs.chmodSync(envPath, 0o600);
     console.log("✅ .env generated successfully");
