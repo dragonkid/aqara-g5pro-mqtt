@@ -14,6 +14,7 @@ interface Config {
   brightness?: boolean;
   device_class?: string;
   unit_of_measurement?: string;
+  options?: string[];
 }
 interface Definition {
   topic: string;
@@ -167,6 +168,9 @@ export class HausPublication {
           entity.max = config.max ?? 100;
           entity.step = config.step ?? 1;
           entity.state = known && Number.isFinite(Number(value)) ? Number(value) : null;
+        } else if (domain === "select") {
+          entity.options = Array.isArray(config.options) ? config.options.map(String) : [];
+          entity.state = known ? value.slice(0, 512) : null;
         } else if (known) {
           entity.state =
             value !== "" && Number.isFinite(Number(value)) ? Number(value) : value.slice(0, 512);

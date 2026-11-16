@@ -202,6 +202,42 @@ export function publishCameraDiscovery(
   console.log(`🎥 Published discovery for Camera entity on ${mqttDevice.name}`);
 }
 
+export function publishQualityDiscovery(client: MqttClient, mqttDevice: MQTTDevice) {
+  const device = {
+    identifiers: mqttDevice.identifiers,
+    manufacturer: mqttDevice.manufacturer,
+    model: mqttDevice.model,
+    name: mqttDevice.name,
+  };
+  const sel = `homeassistant/select/${mqttDevice.id}/quality`;
+  client.publish(
+    `${sel}/config`,
+    JSON.stringify({
+      name: `${mqttDevice.name} Quality`,
+      unique_id: `${mqttDevice.id}_quality`,
+      command_topic: `${sel}/set`,
+      state_topic: `${sel}/state`,
+      options: ["auto", "360p", "720p", "1080p"],
+      icon: "mdi:video-high-definition",
+      device,
+    }),
+    { retain: true },
+  );
+  const sen = `homeassistant/sensor/${mqttDevice.id}/quality_effective`;
+  client.publish(
+    `${sen}/config`,
+    JSON.stringify({
+      name: `${mqttDevice.name} Effective Quality`,
+      unique_id: `${mqttDevice.id}_quality_effective`,
+      state_topic: `${sen}/state`,
+      icon: "mdi:video-outline",
+      device,
+    }),
+    { retain: true },
+  );
+  console.log(`🎚️ Published Quality select discovery on ${mqttDevice.name}`);
+}
+
 export function publishPTZDiscovery(client: MqttClient, mqttDevice: MQTTDevice) {
   const directions: Array<{
     attr: string;

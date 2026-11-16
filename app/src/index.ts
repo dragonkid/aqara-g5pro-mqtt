@@ -12,7 +12,7 @@ import { AqaraCameraBridge, getLocalIpv4 } from "./bridge.js";
 import { resolveCameraIp } from "./camera-ip.js";
 import "./config.js";
 import { promises as fs } from "node:fs";
-import { getCameraStreamQualities, pickMaxStreamQuality, jsonQualityChannel } from "./aqara.js";
+import { getCameraStreamQualities, pickMaxStreamQuality } from "./aqara.js";
 import {
   publishCameraDiscovery,
   publishDiscovery,
@@ -21,6 +21,7 @@ import {
   publishP2PRTSPDiscovery,
   publishP2PStreamSwitchDiscovery,
   publishPTZDiscovery,
+  publishQualityDiscovery,
   publishRTSPDiscovery,
   publishSDCardDiscovery,
   publishSnapshotUrlDiscovery,
@@ -46,6 +47,17 @@ import { NativeMediaEngine } from "./native-engine.js";
 import { Device, MQTTDevice } from "./types.js";
 import { generateEnvExample, normalizeValue } from "./utils.js";
 import { loadP2PState, saveP2PState, getDataDir, getCameraState, setCameraState } from "./state.js";
+import {
+  loadQuality,
+  getChannel,
+  getMode,
+  getEffective,
+  setMode,
+  onStall,
+  onHealthy,
+  QUALITY_OPTIONS,
+  type QualityMode,
+} from "./quality.js";
 import { StreamRecovery } from "./stream-recovery.js";
 import { closeDatabase } from "./db/data-source.js";
 import { diagnostics, cameraDiagnosticId } from "./diagnostics.js";
@@ -313,6 +325,32 @@ function restartCameraStream(cameraInfo: (typeof cameraData)[number], reason: st
   recovery.request(reason);
 }
 
+function publishQualityState(cameraInfo: (typeof cameraData)[number]): void {
+  const deviceId = cameraInfo.mqttDevice.id;
+  const did = cameraInfo.device.did;
+  client.publish(`homeassistant/select/${deviceId}/quality/state`, getMode(did), {
+    retain: true,
+  });
+  client.publish(
+    `homeassistant/sensor/${deviceId}/quality_effective/state`,
+    getEffective(did),
+    { retain: true },
+  );
+}
+
+/** Tear down the bridge so it is recreated with the new quality channel. */
+function applyQualityRestart(cameraInfo: (typeof cameraData)[number]): void {
+  try {
+    cameraInfo.bridge?.stop();
+  } catch {}
+  cameraInfo.bridge = undefined;
+  try {
+    cameraInfo.snapshotter?.stop();
+  } catch {}
+  cameraInfo.snapshotter = undefined;
+  restartCameraStream(cameraInfo, "Quality channel changed");
+}
+
 async function ensureCameraBridge(
   cameraInfo: (typeof cameraData)[number],
   signal?: AbortSignal,
@@ -352,7 +390,7 @@ async function ensureCameraBridge(
       udpAudioPort: audioRtpPort,
       model: cameraInfo.device.model,
       videoCodec: cameraInfo.videoCodec,
-      p2pQualityChannel: jsonQualityChannel(null, cameraInfo.device.model),
+      p2pQualityChannel: getChannel(cameraInfo.device.did),
       videoKey: process.env.VIDEO_KEY,
       deviceName: cameraInfo.device.deviceName,
     });
@@ -369,6 +407,7 @@ async function ensureCameraBridge(
       client.publish(`homeassistant/sensor/${deviceId}/snapshot_url/state`, snapshotUrl, {
         retain: true,
       });
+      publishQualityState(cameraInfo);
     };
 
     const startSnapshotter = () => {
@@ -408,7 +447,12 @@ async function ensureCameraBridge(
     };
 
     bridge.on("unhealthy", () => {
-      void restartCameraStream(cameraInfo, "Native P2P engine reported video stream stall");
+      if (onStall(cameraInfo.device.did)) {
+        publishQualityState(cameraInfo);
+        applyQualityRestart(cameraInfo);
+      } else {
+        void restartCameraStream(cameraInfo, "Native P2P engine reported video stream stall");
+      }
     });
 
     bridge.on("rtsp_listening", (url) => {
@@ -425,6 +469,10 @@ async function ensureCameraBridge(
       cameraInfo.videoCodec = codec;
       void setCameraState(cameraInfo.device.did, { video_codec: codec }).catch(() => {});
       recoveries.get(cameraInfo.device.did)?.healthy();
+      onHealthy(cameraInfo.device.did, () => {
+        publishQualityState(cameraInfo);
+        applyQualityRestart(cameraInfo);
+      });
       FallbackStreamManager.getInstance().stopFallback(slug);
       OfflineCardManager.getInstance().setOnline(slug);
       updateStreamEntities();
@@ -466,6 +514,8 @@ async function ensureCameraBridge(
     }
   }
 }
+
+await loadQuality();
 
 // Auto-restore saved P2P streams immediately on app boot
 void (async () => {
@@ -616,6 +666,17 @@ async function publishCameraDefinitions() {
       }
 
       publishCameraDiscovery(client, mqttDevice, p2pRtspUrl);
+      publishQualityDiscovery(client, mqttDevice);
+      client.publish(
+        `homeassistant/select/${mqttDevice.id}/quality/state`,
+        getMode(device.did),
+        { retain: true },
+      );
+      client.publish(
+        `homeassistant/sensor/${mqttDevice.id}/quality_effective/state`,
+        getEffective(device.did),
+        { retain: true },
+      );
     }),
   );
 
@@ -706,6 +767,18 @@ async function executeCameraCommand(topic: string, msg: Buffer) {
   }
 
   const subjectId = cameraInfo.device.did;
+
+  // === QUALITY SELECT (local bridge setting, not a cloud attribute) ===
+  if (domain === "select" && attr === "quality") {
+    const m = value as QualityMode;
+    if (QUALITY_OPTIONS.includes(m)) {
+      await setMode(cameraInfo.device.did, m);
+      publishQualityState(cameraInfo);
+      console.log(`⬅️ HA → ${cameraInfo.device.deviceName}.quality=${m}`);
+      applyQualityRestart(cameraInfo);
+    }
+    return;
+  }
   // Log significant control events; filter high-frequency poll noise
   if (
     attr === "p2p_stream" ||
@@ -1027,7 +1100,14 @@ function publishHausInventory() {
     })),
   });
 }
-publishHausInventory();
+try {
+  publishHausInventory();
+} catch (err) {
+  console.warn(
+    "[Haus] Initial native inventory update unavailable:",
+    err instanceof Error ? err.message : err,
+  );
+}
 const hausInventoryTimer = setInterval(() => {
   try {
     publishHausInventory();
