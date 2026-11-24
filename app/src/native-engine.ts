@@ -104,7 +104,16 @@ export class NativeMediaEngine extends EventEmitter {
       });
       const errors = readline.createInterface({ input: child.stderr!, terminal: false });
       errors.on("line", (line) => {
-        if (line.trim()) console.warn("[Native]", redactDiagnostic(line));
+        if (!line.trim()) return;
+        // The worker exposes AVIO video sequence gaps only as stderr text (no
+        // structured stdout event). Surface the cumulative gap counter so the
+        // quality controller can detect a lossy-but-never-stalled link.
+        const gapMatch = line.match(/\[AVIO\][^\n]*\bsequence gap\b[^\n]*\bgaps=(\d+)/);
+        if (gapMatch) {
+          const gaps = Number(gapMatch[1]);
+          for (const did of this.outputs.keys()) this.emit("sequence_gap", did, gaps);
+        }
+        console.warn("[Native]", redactDiagnostic(line));
       });
       child.once("error", () => {
         diagnostics.record("worker.spawn_failed", {}, "error");

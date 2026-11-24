@@ -20,10 +20,22 @@ const LABEL: Record<number, string> = { 0: "1080p", 1: "720p", 2: "360p" };
 const STALLS_TO_DOWNGRADE = 3;
 const UPGRADE_STABLE_MS = 120_000;
 
+// Lossy-link detection: the native worker reports AVIO video sequence gaps as a
+// cumulative counter. A weak link can keep delivering occasional keyframes (so
+// `unhealthy` never fires and `onHealthy` keeps clearing the stall counter) while
+// the picture is actually broken. Downgrade on gap RATE, independent of stalls.
+const GAP_WINDOW_MS = 60_000;
+const GAPS_TO_DOWNGRADE = 10;
+const GAP_DOWNGRADE_COOLDOWN_MS = 60_000;
+
 const mode = new Map<string, QualityMode>();
 const channel = new Map<string, number>();
 const stalls = new Map<string, number>();
 const upgradeTimer = new Map<string, NodeJS.Timeout>();
+const gapState = new Map<
+  string,
+  { last: number; windowStart: number; windowGaps: number; lastDowngrade: number }
+>();
 
 function qualityFile(): string {
   return path.join(getDataDir(), "quality.json");
@@ -70,6 +82,7 @@ export async function setMode(did: string, m: QualityMode): Promise<void> {
   mode.set(did, m);
   channel.set(did, m === "auto" ? 0 : CHANNEL[m]);
   stalls.set(did, 0);
+  gapState.delete(did);
   clearUpgrade(did);
   await persist();
 }
@@ -96,6 +109,51 @@ export function onStall(did: string): boolean {
     channel.set(did, cur + 1);
     stalls.set(did, 0);
     console.log(`[Quality:${did}] auto downgrade -> ${LABEL[cur + 1]} after ${n} stalls`);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Record an AVIO sequence-gap observation (cumulative counter from the native
+ * worker). Detects the lossy-but-never-stalled mode that `onStall` misses: enough
+ * new gaps within a sliding window means the link cannot sustain the current
+ * channel, so downgrade one step. Independent of the keyframe-reset stall counter
+ * so periodic keyframes cannot mask sustained loss. Returns true when the
+ * effective channel changed (caller must restart the bridge).
+ */
+export function onGap(did: string, cumulative: number): boolean {
+  if (getMode(did) !== "auto") return false;
+  const now = Date.now();
+  const s = gapState.get(did);
+  if (!s || cumulative < s.last) {
+    // First observation, or the worker restarted and reset its counter.
+    gapState.set(did, { last: cumulative, windowStart: now, windowGaps: 0, lastDowngrade: 0 });
+    return false;
+  }
+  const delta = cumulative - s.last;
+  s.last = cumulative;
+  if (now - s.windowStart > GAP_WINDOW_MS) {
+    s.windowStart = now;
+    s.windowGaps = 0;
+  }
+  s.windowGaps += delta;
+  const cur = getChannel(did);
+  if (
+    s.windowGaps >= GAPS_TO_DOWNGRADE &&
+    cur < 2 &&
+    now - s.lastDowngrade >= GAP_DOWNGRADE_COOLDOWN_MS
+  ) {
+    const observed = s.windowGaps;
+    s.lastDowngrade = now;
+    s.windowStart = now;
+    s.windowGaps = 0;
+    channel.set(did, cur + 1);
+    stalls.set(did, 0);
+    clearUpgrade(did);
+    console.log(
+      `[Quality:${did}] auto downgrade -> ${LABEL[cur + 1]} after ${observed} sequence gaps/${GAP_WINDOW_MS / 1000}s (lossy link)`,
+    );
     return true;
   }
   return false;

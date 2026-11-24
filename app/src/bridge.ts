@@ -427,6 +427,12 @@ export class AqaraCameraBridge extends EventEmitter {
       }
     });
 
+    registerListener("sequence_gap", (did: string, gaps: number) => {
+      if (did === this.did) {
+        this.emit("sequence_gap", gaps);
+      }
+    });
+
     registerListener("error", (message: { did?: string; message?: string; operation?: string }) => {
       if (message.did === this.did) {
         this.emit("warn", message.message || "Native media operation failed");

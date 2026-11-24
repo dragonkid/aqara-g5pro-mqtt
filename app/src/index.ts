@@ -55,6 +55,7 @@ import {
   setMode,
   onStall,
   onHealthy,
+  onGap,
   QUALITY_OPTIONS,
   type QualityMode,
 } from "./quality.js";
@@ -452,6 +453,15 @@ async function ensureCameraBridge(
         applyQualityRestart(cameraInfo);
       } else {
         void restartCameraStream(cameraInfo, "Native P2P engine reported video stream stall");
+      }
+    });
+
+    // Lossy-but-never-stalled link: AVIO sequence gaps accumulate even while
+    // occasional keyframes keep the stream "healthy". Downgrade on gap rate.
+    bridge.on("sequence_gap", (gaps: number) => {
+      if (onGap(cameraInfo.device.did, gaps)) {
+        publishQualityState(cameraInfo);
+        applyQualityRestart(cameraInfo);
       }
     });
 
